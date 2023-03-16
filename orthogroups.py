@@ -1,67 +1,83 @@
 import os
 import pandas as pd
 from Bio import SeqIO
-from Bio.SeqRecord import SeqRecord
+from Bio import pairwise2
 from Bio.Seq import Seq
+from Bio.Alphabet import generic_dna
+import networkx as nx
+import matplotlib.pyplot as plt
 
-# Define input and output files
-input_dir = "path/to/input/directory"
-output_dir = "path/to/output/directory"
-genotype_list = "path/to/genotype_list.txt"
-nlr_seq_file = "path/to/NLR_sequences.fasta"
-evalue_cutoff = 1e-10
+# Define the input file paths and output directories
+genotype_dir = "/path/to/genotype_files/"
+output_dir = "/path/to/output_dir/"
 
-# Read genotype list
-with open(genotype_list, "r") as f:
-    genotypes = [line.strip() for line in f]
+# Create the output directories if they don't exist
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
 
-# Read NLR protein sequences
-nlr_seqs = SeqIO.parse(nlr_seq_file, "fasta")
+# Define the threshold for sequence similarity
+similarity_threshold = 0.8
 
-# Initialize dictionary to store NLR sequences by genotype
-genotype_nlr_seqs = {}
-for genotype in genotypes:
-    genotype_nlr_seqs[genotype] = []
+# Define a function to read in the protein sequences from a FASTA file
+def read_sequences(fasta_file):
+    seq_records = []
+    for record in SeqIO.parse(fasta_file, "fasta"):
+        seq_records.append(record)
+    return seq_records
 
-# Store NLR sequences in dictionary by genotype
-for nlr_seq in nlr_seqs:
-    for genotype in genotypes:
-        if genotype in nlr_seq.id:
-            genotype_nlr_seqs[genotype].append(nlr_seq)
+# Define a function to perform a pairwise alignment of two protein sequences and return the similarity score
+def get_similarity_score(seq1, seq2):
+    alignments = pairwise2.align.globalxx(seq1.seq, seq2.seq)
+    if len(alignments) > 0:
+        best_alignment = alignments[0]
+        alignment_length = max(len(best_alignment[0]), len(best_alignment[1]))
+        similarity_score = float(best_alignment[2]) / float(alignment_length)
+        return similarity_score
+    else:
+        return 0
 
-# Perform all-vs-all BLASTP
-for i, genotype1 in enumerate(genotypes):
-    for j, genotype2 in enumerate(genotypes[i+1:]):
-        blastp_output = f"{output_dir}/{genotype1}_vs_{genotype2}.blastp"
-        if not os.path.isfile(blastp_output):
-            cmd = f"blastp -query {input_dir}/{genotype1}.fasta -subject {input_dir}/{genotype2}.fasta -evalue {evalue_cutoff} -out {blastp_output}"
-            os.system(cmd)
+# Read in the NLR protein sequences for all genotypes
+sequences = {}
+for genotype_file in os.listdir(genotype_dir):
+    genotype_name = genotype_file.split(".")[0]
+    genotype_path = os.path.join(genotype_dir, genotype_file)
+    sequences[genotype_name] = read_sequences(genotype_path)
 
-# Parse BLASTP output and store results in DataFrame
-df = pd.DataFrame(columns=["Genotype1", "Genotype2", "E-value", "Orthogroup"])
-for i, genotype1 in enumerate(genotypes):
-    for j, genotype2 in enumerate(genotypes[i+1:]):
-        blastp_output = f"{output_dir}/{genotype1}_vs_{genotype2}.blastp"
-        with open(blastp_output, "r") as f:
-            for line in f:
-                if line.startswith("#"):
-                    continue
-                fields = line.strip().split("\t")
-                evalue = float(fields[-2])
-                if evalue <= evalue_cutoff:
-                    seq1 = SeqRecord(Seq(fields[0]), id=genotype1, description="")
-                    seq2 = SeqRecord(Seq(fields[1]), id=genotype2, description="")
-                    orthogroup = f"{genotype1}_{genotype2}"
-                    df = df.append({"Genotype1": genotype1, "Genotype2": genotype2, "E-value": evalue, "Orthogroup": orthogroup}, ignore_index=True)
+# Perform pairwise alignments of all NLR protein sequences
+similarity_matrix = pd.DataFrame(index=sequences.keys(), columns=sequences.keys())
+for genotype1 in sequences.keys():
+    for genotype2 in sequences.keys():
+        if genotype1 == genotype2:
+            similarity_matrix.loc[genotype1, genotype2] = 1
+        else:
+            seq1 = sequences[genotype1]
+            seq2 = sequences[genotype2]
+            max_similarity_score = 0
+            for nlr1 in seq1:
+                for nlr2 in seq2:
+                    similarity_score = get_similarity_score(nlr1, nlr2)
+                    if similarity_score > max_similarity_score:
+                        max_similarity_score = similarity_score
+            similarity_matrix.loc[genotype1, genotype2] = max_similarity_score
 
-# Define function to find orthogroups
-def find_orthogroups(df, genotype_nlr_seqs, orthogroups=None):
-    if orthogroups is None:
-        orthogroups = {}
-    for genotype in genotypes:
-        if genotype not in orthogroups:
-            orthogroups[genotype] = []
-    for i, row in df.iterrows():
-        seq1 = SeqRecord(Seq(row["Orthogroup"].split("_")[0]), id=row["Genotype1"], description="")
-        seq2 = SeqRecord(Seq(row["Orthogroup"].split("_")[1]), id=row["Genotype2"], description="")
-        if seq1 in genotype_nlr_seqs[row["Genotype1"]] and seq2 in genotype_nlr_seqs[row["
+# Generate a network graph of orthogroup families
+G = nx.Graph()
+for i, row in similarity_matrix.iterrows():
+    for j, value in row.iteritems():
+        if value >= similarity_threshold:
+            G.add_edge(i, j)
+
+# Write out the orthogroup families to a file
+orthogroup_families_file = os.path.join(output_dir, "orthogroup_families.txt")
+with open(orthogroup_families_file, "w") as outfile:
+    for component in nx.connected_components(G):
+        outfile.write("\t".join(component) + "\n")
+
+# Generate a network graph of the orthogroups
+pos = nx.spring_layout(G)
+plt.figure(figsize=(12, 12))
+nx.draw_networkx_nodes(G, pos, node_size=1000, node_color="lightblue")
+nx.draw_networkx_edges(G, pos, width=1, alpha=0.7)
+nx.draw_networkx_labels(G, pos, font_size=12, font_family="sans-serif")
+plt.axis("off")
+plt.savefig(os.path.join(output
