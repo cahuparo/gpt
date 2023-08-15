@@ -62,7 +62,7 @@
     },
     {
       "alignment": "left",
-      "newline": true,
+      "newline": false,
       "segments": [
         {
           "foreground": "#007ACC",
@@ -74,5 +74,5 @@
       "type": "prompt"
     }
   ],
-  "version": 1
+  "version": 2
 }
